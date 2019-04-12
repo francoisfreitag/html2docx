@@ -1,9 +1,11 @@
 import io
 import re
 from html.parser import HTMLParser
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from docx import Document
+from docx.opc import constants
+from docx.oxml.shared import OxmlElement, qn
 from docx.text.paragraph import Paragraph
 
 WHITESPACE_RE = re.compile(r"\s+")
@@ -23,6 +25,7 @@ class HTML2Docx(HTMLParser):
         self.bold = 0
         self.italic = 0
         self.underline = 0
+        self.href: Optional[str] = None
 
     def feed(self, data: str) -> None:
         super().feed(data)
@@ -50,6 +53,8 @@ class HTML2Docx(HTMLParser):
             self.italic += 1
         elif tag == "u":
             self.underline += 1
+        elif tag == "a":
+            _, self.href = [(attr, val) for attr, val in attrs if attr == "href"][0]
 
     def handle_endtag(self, tag: str) -> None:
         if tag in ["p", "div", "li"] or self.header_re.match(tag):
@@ -63,6 +68,8 @@ class HTML2Docx(HTMLParser):
             self.italic -= 1
         elif tag == "u":
             self.underline -= 1
+        elif tag == "a":
+            self.href = None
 
     def handle_data(self, data: str) -> None:
         if self.p or data.strip():
@@ -77,6 +84,7 @@ class HTML2Docx(HTMLParser):
             bold=bool(self.bold),
             italic=bool(self.italic),
             underline=bool(self.underline),
+            href=self.href,
             strip_whitespace=strip_whitespace,
         )
         self.runs.append(run)
@@ -95,7 +103,9 @@ class HTML2Docx(HTMLParser):
             prev_run = run
 
         for run in self.runs:
-            if run.text:
+            if run.href:
+                doc_run = self.add_hyperlink(self.p, run.href, run.text)
+            elif run.text:
                 doc_run = self.p.add_run(run.text)
                 doc_run.bold = run.bold
                 doc_run.italic = run.italic
@@ -112,6 +122,34 @@ class HTML2Docx(HTMLParser):
             style = f"{style} {level}"
         self.list_style.append(style)
 
+    def add_hyperlink(self, paragraph, url, text):
+        # Snippet from
+        # https://github.com/python-openxml/python-docx/issues/74#issuecomment-261169410
+        r_id = paragraph.part.relate_to(
+            url, constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True
+        )
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("r:id"), r_id)
+
+        new_run = OxmlElement("w:r")
+        rPr = OxmlElement("w:rPr")
+
+        # Underline
+        u = OxmlElement("w:u")
+        u.set(qn("w:val"), "single")
+        rPr.append(u)
+
+        c = OxmlElement("w:color")
+        c.set(qn("w:val"), "0000FF")
+        rPr.append(c)
+
+        new_run.append(rPr)
+        new_run.text = text
+        hyperlink.append(new_run)
+
+        paragraph._p.append(hyperlink)
+        return hyperlink
+
 
 class Run:
     def __init__(
@@ -120,6 +158,7 @@ class Run:
         bold: bool = False,
         italic: bool = False,
         underline: bool = False,
+        href: str = None,
         strip_whitespace: bool = True,
     ):
         self.text = text
@@ -127,6 +166,7 @@ class Run:
         self.italic = italic
         self.underline = underline
         self.strip_whitespace = strip_whitespace
+        self.href = href
 
         self.needs_space_prefix = bool(WHITESPACE_RE.match(text[0]))
         self.needs_space_suffix = bool(WHITESPACE_RE.match(text[-1]))
